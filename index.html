@@ -13,6 +13,7 @@
   ::-webkit-scrollbar { width: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: rgba(212,175,55,0.2); border-radius: 3px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
@@ -20,24 +21,19 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <script type="text/babel">
 const { useState, useEffect, useCallback } = React;
+
+// ─── SUPABASE CONNECTION ───
+const supabase = window.supabase.createClient(
+  "https://aixrmofttysnoquljnre.supabase.co",
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFpeHJtb2Z0dHlzbm9xdWxqbnJlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIyODQ5NDgsImV4cCI6MjA5Nzg2MDk0OH0.ETqYt9xxQp_ikw1Z4ytloUyrq2_bK2SA7Y-bY6vSerE"
+);
 
 const CATEGORIES = ["Food", "Travel", "Bills", "Other"];
 const CATEGORY_ICONS = { Food: "🍽️", Travel: "✈️", Bills: "📄", Other: "📦" };
 const CATEGORY_COLORS = { Food: "#f59e0b", Travel: "#3b82f6", Bills: "#8b5cf6", Other: "#6b7280" };
-
-const storage = {
-  get(key) { const v = localStorage.getItem(key); return v ? { value: v } : null; },
-  set(key, value) { localStorage.setItem(key, value); return { key, value }; },
-  delete(key) { localStorage.removeItem(key); return { key, deleted: true }; },
-};
-
-function hashPassword(pass) {
-  let h = 0;
-  for (let i = 0; i < pass.length; i++) h = (Math.imul(31, h) + pass.charCodeAt(i)) | 0;
-  return String(h);
-}
 
 function formatCurrency(amount) {
   return new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(amount);
@@ -45,6 +41,10 @@ function formatCurrency(amount) {
 
 function formatDate(dateStr) {
   return new Date(dateStr + "T00:00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
+}
+
+function Spinner() {
+  return <span style={{ display:"inline-block", width:16, height:16, border:"2px solid rgba(10,10,15,0.3)", borderTop:"2px solid #0a0a0f", borderRadius:"50%", animation:"spin 0.6s linear infinite", verticalAlign:"middle" }}/>;
 }
 
 function ExpenseTracker() {
@@ -55,6 +55,7 @@ function ExpenseTracker() {
   const [name, setName] = useState("");
   const [authError, setAuthError] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
+  const [appLoading, setAppLoading] = useState(true);
 
   const [expenses, setExpenses] = useState([]);
   const [expName, setExpName] = useState("");
@@ -62,90 +63,108 @@ function ExpenseTracker() {
   const [expCategory, setExpCategory] = useState("Food");
   const [expDate, setExpDate] = useState(new Date().toISOString().split("T")[0]);
   const [addError, setAddError] = useState("");
+  const [addLoading, setAddLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [deletingId, setDeletingId] = useState(null);
   const [filterCat, setFilterCat] = useState("All");
 
-  const storageKey = currentUser ? `expenses:${currentUser.email}` : null;
+  // ─── CHECK IF ALREADY LOGGED IN ───
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setCurrentUser(session?.user ?? null);
+      setAppLoading(false);
+    });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setCurrentUser(session?.user ?? null);
+    });
+    return () => subscription.unsubscribe();
+  }, []);
 
-  const loadExpenses = useCallback(() => {
-    if (!storageKey) return;
+  // ─── LOAD EXPENSES FROM SUPABASE ───
+  const loadExpenses = useCallback(async () => {
+    if (!currentUser) return;
     setLoading(true);
-    try {
-      const result = storage.get(storageKey);
-      if (result?.value) setExpenses(JSON.parse(result.value));
-      else setExpenses([]);
-    } catch { setExpenses([]); }
+    const { data, error } = await supabase
+      .from("expenses")
+      .select("*")
+      .order("created_at", { ascending: false });
+    if (!error && data) setExpenses(data);
     setLoading(false);
-  }, [storageKey]);
-
-  const saveExpenses = (list) => {
-    if (!storageKey) return;
-    storage.set(storageKey, JSON.stringify(list));
-  };
+  }, [currentUser]);
 
   useEffect(() => { if (currentUser) loadExpenses(); }, [currentUser, loadExpenses]);
 
-  // Auto-login from session
-  useEffect(() => {
-    const saved = localStorage.getItem("__session");
-    if (saved) { try { setCurrentUser(JSON.parse(saved)); } catch {} }
-  }, []);
-
-  useEffect(() => {
-    if (currentUser) localStorage.setItem("__session", JSON.stringify(currentUser));
-    else localStorage.removeItem("__session");
-  }, [currentUser]);
-
-  const handleAuth = () => {
+  // ─── AUTH ───
+  const handleAuth = async () => {
     setAuthError("");
     if (!email.trim() || !password.trim()) { setAuthError("Please fill in all fields."); return; }
     if (authMode === "signup" && !name.trim()) { setAuthError("Please enter your name."); return; }
+    if (password.trim().length < 6) { setAuthError("Password must be at least 6 characters."); return; }
     setAuthLoading(true);
-    const userKey = `user:${email.toLowerCase().trim()}`;
-    if (authMode === "signup") {
-      const existing = storage.get(userKey);
-      if (existing?.value) { setAuthError("An account with this email already exists."); setAuthLoading(false); return; }
-      const userData = { email: email.toLowerCase().trim(), name: name.trim(), passHash: hashPassword(password) };
-      storage.set(userKey, JSON.stringify(userData));
-      setCurrentUser(userData);
-    } else {
-      const result = storage.get(userKey);
-      const stored = result?.value ? JSON.parse(result.value) : null;
-      if (!stored) { setAuthError("No account found. Please sign up first."); setAuthLoading(false); return; }
-      if (stored.passHash !== hashPassword(password)) { setAuthError("Incorrect password."); setAuthLoading(false); return; }
-      setCurrentUser(stored);
+    try {
+      if (authMode === "signup") {
+        const { data, error } = await supabase.auth.signUp({
+          email: email.trim(),
+          password: password.trim(),
+          options: { data: { full_name: name.trim() } }
+        });
+        if (error) { setAuthError(error.message); setAuthLoading(false); return; }
+        if (data.user && !data.session) {
+          setAuthError("Check your email for a confirmation link, then sign in.");
+          setAuthMode("login");
+          setAuthLoading(false);
+          return;
+        }
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({
+          email: email.trim(),
+          password: password.trim(),
+        });
+        if (error) { setAuthError(error.message); setAuthLoading(false); return; }
+      }
+    } catch (e) {
+      setAuthError("Something went wrong. Try again.");
     }
     setAuthLoading(false);
   };
 
-  const handleAddExpense = () => {
+  // ─── ADD EXPENSE ───
+  const handleAddExpense = async () => {
     setAddError("");
     if (!expName.trim()) { setAddError("Enter a name."); return; }
     if (!expAmount || isNaN(expAmount) || Number(expAmount) <= 0) { setAddError("Enter a valid amount."); return; }
     if (!expDate) { setAddError("Pick a date."); return; }
-    const newExp = {
-      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-      name: expName.trim(), amount: Number(expAmount), category: expCategory, date: expDate,
-    };
-    const updated = [newExp, ...expenses];
-    setExpenses(updated);
-    saveExpenses(updated);
+    setAddLoading(true);
+    const { data, error } = await supabase
+      .from("expenses")
+      .insert({
+        user_id: currentUser.id,
+        name: expName.trim(),
+        amount: Number(expAmount),
+        category: expCategory,
+        date: expDate,
+      })
+      .select();
+    if (error) { setAddError("Failed to add. Try again."); setAddLoading(false); return; }
+    setExpenses([data[0], ...expenses]);
     setExpName(""); setExpAmount(""); setExpCategory("Food");
     setExpDate(new Date().toISOString().split("T")[0]);
+    setAddLoading(false);
   };
 
-  const handleDelete = (id) => {
+  // ─── DELETE EXPENSE ───
+  const handleDelete = async (id) => {
     setDeletingId(id);
-    setTimeout(() => {
-      const updated = expenses.filter((e) => e.id !== id);
-      setExpenses(updated);
-      saveExpenses(updated);
+    setTimeout(async () => {
+      const { error } = await supabase.from("expenses").delete().eq("id", id);
+      if (!error) setExpenses(prev => prev.filter(e => e.id !== id));
       setDeletingId(null);
     }, 300);
   };
 
-  const logout = () => {
+  // ─── LOGOUT ───
+  const logout = async () => {
+    await supabase.auth.signOut();
     setCurrentUser(null); setExpenses([]); setEmail(""); setPassword(""); setName(""); setAuthError("");
   };
 
@@ -155,6 +174,9 @@ function ExpenseTracker() {
     cat: c, total: expenses.filter((e) => e.category === c).reduce((s, e) => s + e.amount, 0),
   }));
 
+  const userName = currentUser?.user_metadata?.full_name || currentUser?.email?.split("@")[0] || "there";
+
+  // ─── STYLES ───
   const s = {
     app: { minHeight:"100vh", background:"linear-gradient(160deg,#0a0a0f 0%,#111118 40%,#0d0d14 100%)", fontFamily:"'Inter',-apple-system,BlinkMacSystemFont,sans-serif", color:"#e8e4df", display:"flex", justifyContent:"center", padding:"20px" },
     wrapper: { width:"100%", maxWidth:520 },
@@ -166,7 +188,7 @@ function ExpenseTracker() {
     cardTitle: { fontSize:14, fontWeight:600, color:"#d4af37", marginBottom:18, letterSpacing:"0.04em" },
     input: { width:"100%", padding:"12px 14px", background:"rgba(255,255,255,0.04)", border:"1px solid rgba(255,255,255,0.08)", borderRadius:10, color:"#e8e4df", fontSize:14, outline:"none", marginBottom:12, boxSizing:"border-box", transition:"border-color 0.2s" },
     select: { width:"100%", padding:"12px 14px", background:"rgba(255,255,255,0.04)", border:"1px solid rgba(255,255,255,0.08)", borderRadius:10, color:"#e8e4df", fontSize:14, outline:"none", marginBottom:12, boxSizing:"border-box", appearance:"none" },
-    btnPrimary: { width:"100%", padding:"13px", background:"linear-gradient(135deg,#d4af37,#c49b2a)", color:"#0a0a0f", fontWeight:700, fontSize:14, border:"none", borderRadius:10, cursor:"pointer", letterSpacing:"0.04em", transition:"opacity 0.2s" },
+    btnPrimary: { width:"100%", padding:"13px", background:"linear-gradient(135deg,#d4af37,#c49b2a)", color:"#0a0a0f", fontWeight:700, fontSize:14, border:"none", borderRadius:10, cursor:"pointer", letterSpacing:"0.04em", transition:"opacity 0.2s", display:"flex", alignItems:"center", justifyContent:"center", gap:8 },
     error: { color:"#ef4444", fontSize:12, marginBottom:10 },
     link: { color:"#d4af37", background:"none", border:"none", cursor:"pointer", fontSize:13, textDecoration:"underline", padding:0 },
     topBar: { display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16 },
@@ -187,10 +209,22 @@ function ExpenseTracker() {
   const filterBtn = (active) => ({ padding:"6px 14px", borderRadius:20, fontSize:12, fontWeight:500, border:active?"1px solid #d4af37":"1px solid rgba(255,255,255,0.08)", background:active?"rgba(212,175,55,0.12)":"rgba(255,255,255,0.03)", color:active?"#d4af37":"#7a756e", cursor:"pointer", transition:"all 0.2s" });
   const expItem = (del) => ({ display:"flex", alignItems:"center", gap:12, padding:"14px 0", borderBottom:"1px solid rgba(255,255,255,0.04)", opacity:del?0:1, transform:del?"translateX(40px)":"none", transition:"opacity 0.3s, transform 0.3s" });
   const expIcon = (color) => ({ width:38, height:38, borderRadius:10, background:`${color}15`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:18, flexShrink:0 });
-
   const focusStyle = (e) => e.target.style.borderColor = "rgba(212,175,55,0.4)";
   const blurStyle = (e) => e.target.style.borderColor = "rgba(255,255,255,0.08)";
 
+  // ─── LOADING SCREEN ───
+  if (appLoading) {
+    return (
+      <div style={{...s.app, alignItems:"center"}}>
+        <div style={{textAlign:"center"}}>
+          <div style={{fontSize:36, marginBottom:12}}>💎</div>
+          <div style={{color:"#6b6560", fontSize:13, letterSpacing:"0.1em"}}>LOADING...</div>
+        </div>
+      </div>
+    );
+  }
+
+  // ─── AUTH SCREEN ───
   if (!currentUser) {
     return (
       <div style={s.app}><div style={s.wrapper}>
@@ -203,10 +237,10 @@ function ExpenseTracker() {
           <div style={s.cardTitle}>{authMode==="login"?"WELCOME BACK":"CREATE ACCOUNT"}</div>
           {authMode==="signup" && <input style={s.input} placeholder="Full Name" value={name} onChange={e=>setName(e.target.value)} onFocus={focusStyle} onBlur={blurStyle}/>}
           <input style={s.input} placeholder="Email" type="email" value={email} onChange={e=>setEmail(e.target.value)} onFocus={focusStyle} onBlur={blurStyle}/>
-          <input style={s.input} placeholder="Password" type="password" value={password} onChange={e=>setPassword(e.target.value)} onFocus={focusStyle} onBlur={blurStyle} onKeyDown={e=>e.key==="Enter"&&handleAuth()}/>
+          <input style={s.input} placeholder="Password (min 6 characters)" type="password" value={password} onChange={e=>setPassword(e.target.value)} onFocus={focusStyle} onBlur={blurStyle} onKeyDown={e=>e.key==="Enter"&&handleAuth()}/>
           {authError && <div style={s.error}>{authError}</div>}
-          <button style={{...s.btnPrimary,opacity:authLoading?0.6:1}} onClick={handleAuth} disabled={authLoading}>
-            {authLoading?"Please wait...":authMode==="login"?"Sign In":"Create Account"}
+          <button style={{...s.btnPrimary, opacity:authLoading?0.7:1}} onClick={handleAuth} disabled={authLoading}>
+            {authLoading ? <><Spinner/> Please wait...</> : authMode==="login" ? "Sign In" : "Create Account"}
           </button>
           <div style={{textAlign:"center",marginTop:16,fontSize:13,color:"#6b6560"}}>
             {authMode==="login"?"Don't have an account? ":"Already have an account? "}
@@ -219,6 +253,7 @@ function ExpenseTracker() {
     );
   }
 
+  // ─── MAIN DASHBOARD ───
   return (
     <div style={s.app}><div style={s.wrapper}>
       <div style={s.brand}>
@@ -226,7 +261,7 @@ function ExpenseTracker() {
         <h1 style={s.brandName}>EXPENDITURE</h1>
       </div>
       <div style={s.topBar}>
-        <div style={s.greeting}>Hi, {currentUser.name.split(" ")[0]} 👋</div>
+        <div style={s.greeting}>Hi, {userName.split(" ")[0]} 👋</div>
         <button style={s.logoutBtn} onClick={logout}>Sign Out</button>
       </div>
 
@@ -250,7 +285,9 @@ function ExpenseTracker() {
         </div>
         <input style={s.input} type="date" value={expDate} onChange={e=>setExpDate(e.target.value)} onFocus={focusStyle} onBlur={blurStyle}/>
         {addError && <div style={s.error}>{addError}</div>}
-        <button style={s.btnPrimary} onClick={handleAddExpense}>+ Add Expense</button>
+        <button style={{...s.btnPrimary, opacity:addLoading?0.7:1}} onClick={handleAddExpense} disabled={addLoading}>
+          {addLoading ? <><Spinner/> Adding...</> : "+ Add Expense"}
+        </button>
       </div>
 
       <div style={s.card}>
@@ -264,7 +301,7 @@ function ExpenseTracker() {
             ))}
           </div>
         )}
-        {loading ? <div style={s.empty}>Loading...</div> : filtered.length===0 ? (
+        {loading ? <div style={s.empty}>Loading expenses...</div> : filtered.length===0 ? (
           <div style={s.empty}>{expenses.length===0?"No expenses yet. Add one above!":"No expenses in this category."}</div>
         ) : (
           <>
